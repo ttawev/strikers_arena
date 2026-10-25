@@ -1,0 +1,14 @@
+.DS_Store
+Thumbs.db
+*.log
+
+# Unity (на будущее)
+/unity/[Ll]ibrary/
+/unity/[Tt]emp/
+/unity/[Oo]bj/
+/unity/[Bb]uild/
+/unity/[Bb]uilds/
+/unity/[Ll]ogs/
+/unity/[Uu]ser[Ss]ettings/
+*.csproj
+*.sln
