@@ -101,7 +101,7 @@ body{background:var(--night);color:var(--chalk);font-family:var(--body);touch-ac
   <div class="card">
     <div class="label">Прототип · 1 на 1</div>
     <h1>Арена <em>Страйкеров</em></h1>
-    <p>Забей боту 5 голов или веди в счёте, когда выйдут 3 минуты. Держи «Удар», чтобы зарядить, отпусти, чтобы пробить. «Рывок» сносит соперника и оглушает его.</p>
+    <p>Забей боту 5 голов или веди в счёте, когда выйдут 3 минуты. Держи «Удар», чтобы зарядить, отпусти, чтобы пробить. Коснись мяча лицом, и он прилипнет: веди его, пока не ударишь или пока соперник не отберёт его лицом. «Рывок» сносит соперника, оглушает его и выбивает мяч.</p>
     <div class="label">Сложность бота</div>
     <div class="chips" id="diffChips">
       <button class="chip" data-d="0" id="d0">Лёгкий</button>
@@ -147,9 +147,12 @@ body{background:var(--night);color:var(--chalk);font-family:var(--body);touch-ac
 const FW=600, FH=960, GOAL=220, R=24, BR=13, POST=7, NET=36;
 const GX1=(FW-GOAL)/2, GX2=(FW+GOAL)/2;
 
-const DEFAULTS={speed:310, kick:950, charge:1.6, friction:1.0, dashCd:2.2, dashPow:880, bounce:0.75};
+const DEFAULTS={speed:310, kick:950, charge:1.6, friction:1.0, dashCd:2.2, dashPow:880, bounce:0.75, turn:11, dribble:0.88, catchSpd:800};
 const TUNE_META=[
   ['speed','Скорость героя',180,480,10,v=>v],
+  ['dribble','Скорость с мячом',0.5,1.1,0.02,v=>'×'+v.toFixed(2)],
+  ['turn','Скорость разворота, рад/с',4,30,0.5,v=>v.toFixed(1)],
+  ['catchSpd','Макс. скорость мяча для подбора',200,1700,25,v=>v],
   ['kick','Сила удара',500,1500,25,v=>v],
   ['charge','Множитель заряда',1,2.5,0.05,v=>'×'+v.toFixed(2)],
   ['friction','Трение мяча',0.3,2.5,0.05,v=>v.toFixed(2)],
@@ -166,8 +169,8 @@ const store={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v)
 let T=Object.assign({},DEFAULTS,store.get('arena.tune',{}));
 let diff=store.get('arena.diff',1);
 
-const ball={x:FW/2,y:FH/2,vx:0,vy:0,trail:[]};
-function mkPlayer(team){return{team,x:0,y:0,vx:0,vy:0,fx:0,fy:team==='you'?-1:1,dashT:0,dashCd:0,stun:0,charge:0,charging:false,kickCd:0,flash:0}}
+const ball={x:FW/2,y:FH/2,vx:0,vy:0,trail:[],owner:null,lock:0};
+function mkPlayer(team){return{team,x:0,y:0,vx:0,vy:0,fx:0,fy:team==='you'?-1:1,dashT:0,dashCd:0,stun:0,charge:0,charging:false,kickCd:0,flash:0,grabCd:0}}
 const you=mkPlayer('you'), bot=mkPlayer('bot');
 let score={you:0,bot:0}, clock=180, state='menu', freeze=0, goalText='', goalTeam='', shake=0, particles=[];
 const MATCH=180, WIN=5;
@@ -238,8 +241,8 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function buzz(ms){try{navigator.vibrate&&navigator.vibrate(ms)}catch(e){}}
 
 function kickoff(){
-  ball.x=FW/2;ball.y=FH/2;ball.vx=ball.vy=0;ball.trail=[];
-  for(const p of [you,bot]){p.vx=p.vy=0;p.dashT=0;p.stun=0;p.charge=0;p.charging=false}
+  ball.x=FW/2;ball.y=FH/2;ball.vx=ball.vy=0;ball.trail=[];ball.owner=null;ball.lock=0;
+  for(const p of [you,bot]){p.vx=p.vy=0;p.dashT=0;p.stun=0;p.charge=0;p.charging=false;p.grabCd=0}
   you.x=FW/2;you.y=FH*0.72;you.fx=0;you.fy=-1;
   bot.x=FW/2;bot.y=FH*0.28;bot.fx=0;bot.fy=1;
 }
@@ -248,7 +251,18 @@ function newMatch(){score={you:0,bot:0};clock=MATCH;kickoff();freeze=1.2;goalTex
 // ---------- actions ----------
 function tryKick(p,aimX,aimY,charge){
   if(p.kickCd>0||p.stun>0)return false;
+  if(ball.owner&&ball.owner!==p)return false;
   p.kickCd=0.22;
+  if(ball.owner===p){ // kick from dribble: straight where you aim
+    let a=(aimX||aimY)?norm(aimX,aimY):{x:p.fx,y:p.fy};
+    if(a.x*p.fx+a.y*p.fy<-0.2)a={x:p.fx,y:p.fy};
+    const pow=T.kick*(0.7+(T.charge-0.7)*charge);
+    releaseBall(p,0.3);
+    ball.x=p.x+a.x*(R+BR+2);ball.y=p.y+a.y*(R+BR+2);
+    ball.vx=a.x*pow+p.vx*0.25;ball.vy=a.y*pow+p.vy*0.25;
+    p.flash=0.15;if(p===you)buzz(charge>0.6?25:12);
+    return true;
+  }
   const dx=ball.x-p.x,dy=ball.y-p.y,d=len(dx,dy);
   if(d>R+BR+18)return false;
   const toB=norm(dx,dy);
@@ -268,52 +282,62 @@ function tryDash(p,dx,dy){
   p.dashT=0.17;p.dashCd=T.dashCd;p.vx=d.x*T.dashPow;p.vy=d.y*T.dashPow;
 }
 
+// ---------- possession ----------
+const FRONT=0.34; // cos(70°): ball must touch within ±70° of facing
+function isFront(p){const n=norm(ball.x-p.x,ball.y-p.y);return n.x*p.fx+n.y*p.fy>FRONT}
+function releaseBall(p,cd){if(ball.owner===p){ball.owner=null;p.grabCd=cd}}
+function takeBall(p){ball.owner=p;ball.lock=0.3;p.charging=false;p.charge=0;if(p===you)buzz(10)}
+
 // ---------- bot brain ----------
 let botPlan={mx:0,my:0,t:0,wantKick:false,kx:0,ky:0,chargeTo:0};
+function aimWithError(v,e){const err=(Math.random()-0.5)*e*2,c=Math.cos(err),s=Math.sin(err);return{x:v.x*c-v.y*s,y:v.x*s+v.y*c}}
 function botThink(){
   const D=DIFF[diff];
-  const goal={x:FW/2+(Math.random()-0.5)*GOAL*0.6,y:FH+30};
-  const toGoal=norm(goal.x-ball.x,goal.y-ball.y);
-  const bx=ball.x-toGoal.x*(R+BR+4), by=ball.y-toGoal.y*(R+BR+4);
-  const toBall=norm(ball.x-bot.x,ball.y-bot.y);
+  const goal={x:FW/2+(Math.random()-0.5)*GOAL*0.55,y:FH+30};
   const dBall=len(ball.x-bot.x,ball.y-bot.y);
-  const align=toBall.x*toGoal.x+toBall.y*toGoal.y;
-  botPlan.wantKick=false;
-  // threat: ball heading at bot goal fast, bot not between → defend
-  const threat=ball.vy<-250&&ball.y<FH*0.55&&bot.y>ball.y-20;
-  if(threat){
-    const tx=clamp(ball.x,GX1+10,GX2-10), ty=Math.max(R+6,ball.y-60);
-    const v=norm(tx-bot.x,ty-bot.y);botPlan.mx=v.x;botPlan.my=v.y;
-  }else if(align>0.55&&dBall<R+BR+60){
-    const v=norm(ball.x-bot.x+toGoal.x*10,ball.y-bot.y+toGoal.y*10);botPlan.mx=v.x;botPlan.my=v.y;
-    if(dBall<R+BR+16){
-      const err=(Math.random()-0.5)*D.err*2;const c=Math.cos(err),s=Math.sin(err);
-      botPlan.wantKick=true;botPlan.kx=toGoal.x*c-toGoal.y*s;botPlan.ky=toGoal.x*s+toGoal.y*c;
-      botPlan.chargeTo=ball.y>FH*0.55?0.2:0.4+Math.random()*0.6;
+  if(!botPlan.wantKick){bot.charging=false}
+  if(ball.owner===bot){
+    const toG=norm(goal.x-bot.x,goal.y-bot.y),distG=len(goal.x-bot.x,goal.y-bot.y);
+    const ax=you.x-bot.x,ay=you.y-bot.y,ad=len(ax,ay);
+    let mv=toG;
+    if(ad<140&&(ax*toG.x+ay*toG.y)>0){ // defender ahead: swerve around
+      const px=-toG.y,py=toG.x,side=(ax*px+ay*py)>0?-1:1;
+      mv=norm(toG.x+px*side*1.3,toG.y+py*side*1.3);
     }
-  }else{
-    let tx=bx,ty=by;
-    if(align<0.2){ // on wrong side: go around the ball
-      const px=-toGoal.y,py=toGoal.x;const side=((bot.x-ball.x)*px+(bot.y-ball.y)*py)>0?1:-1;
-      tx=bx+px*side*(R*2.4)-toGoal.x*R;ty=by+py*side*(R*2.4)-toGoal.y*R;
+    botPlan.mx=mv.x;botPlan.my=mv.y;
+    const facing=bot.fx*toG.x+bot.fy*toG.y;
+    if(!botPlan.wantKick&&((distG<420&&facing>0.8)||(ad<75&&distG<700&&facing>0.5))){
+      const a=aimWithError(toG,D.err);botPlan.wantKick=true;botPlan.kx=a.x;botPlan.ky=a.y;
+      botPlan.chargeTo=distG<260?0.1:0.35+Math.random()*0.55;
     }
-    const v=norm(tx-bot.x,ty-bot.y);const far=len(tx-bot.x,ty-bot.y);
-    const sp=Math.min(1,far/40);botPlan.mx=v.x*sp;botPlan.my=v.y*sp;
+    return;
   }
-  // dash to steal
-  const youNear=len(ball.x-you.x,ball.y-you.y)<R+BR+30;
-  if(bot.dashCd<=0&&dBall>60&&dBall<230&&(youNear||threat)&&Math.random()<D.dash*0.35){
+  botPlan.wantKick=false;
+  const threat=!ball.owner&&ball.vy<-250&&ball.y<FH*0.55&&bot.y>ball.y-20;
+  let tx,ty;
+  if(threat){tx=clamp(ball.x,GX1+10,GX2-10);ty=Math.max(R+6,ball.y-60)}
+  else if(ball.owner===you){ // meet the ball face-first; cut off the path to own goal when far
+    tx=ball.x+you.fx*8;ty=ball.y+you.fy*8;
+    if(dBall>200&&you.y<FH*0.5){tx=(ball.x+FW/2)/2;ty=Math.max(R+6,ball.y-90)}
+  }
+  else{tx=ball.x+ball.vx*0.18;ty=ball.y+ball.vy*0.18}
+  const v=norm(tx-bot.x,ty-bot.y);botPlan.mx=v.x;botPlan.my=v.y;
+  if(bot.dashCd<=0&&dBall>55&&dBall<220&&(ball.owner===you||threat)&&Math.random()<D.dash*0.35){
     tryDash(bot,ball.x-bot.x,ball.y-bot.y);
   }
 }
 
 // ---------- simulation ----------
 function stepPlayer(p,ix,iy,spdMul,dt){
-  p.kickCd=Math.max(0,p.kickCd-dt);p.dashCd=Math.max(0,p.dashCd-dt);p.flash=Math.max(0,p.flash-dt);
+  p.kickCd=Math.max(0,p.kickCd-dt);p.dashCd=Math.max(0,p.dashCd-dt);p.flash=Math.max(0,p.flash-dt);p.grabCd=Math.max(0,p.grabCd-dt);
   if(p.stun>0){p.stun-=dt;ix=iy=0;p.charging=false;p.charge=0}
-  if(ix||iy){const n=norm(ix,iy);p.fx=n.x;p.fy=n.y}
+  if(ix||iy){ // turn toward input at a limited rate so the dribbled ball swings around, not teleports
+    const cur=Math.atan2(p.fy,p.fx),tgt=Math.atan2(iy,ix);
+    let d=tgt-cur;while(d>Math.PI)d-=Math.PI*2;while(d<-Math.PI)d+=Math.PI*2;
+    const mx=T.turn*dt,a=cur+clamp(d,-mx,mx);p.fx=Math.cos(a);p.fy=Math.sin(a);
+  }
   if(p.dashT>0){p.dashT-=dt}
-  else{const k=Math.min(1,(p.stun>0?3:14)*dt);const ms=T.speed*spdMul*(p.charging?0.82:1);p.vx+=(ix*ms-p.vx)*k;p.vy+=(iy*ms-p.vy)*k;}
+  else{const k=Math.min(1,(p.stun>0?3:14)*dt);const ms=T.speed*spdMul*(p.charging?0.82:1)*(ball.owner===p?T.dribble:1);p.vx+=(ix*ms-p.vx)*k;p.vy+=(iy*ms-p.vy)*k;}
   p.x+=p.vx*dt;p.y+=p.vy*dt;
   if(p.x<R){p.x=R;p.vx=0}if(p.x>FW-R){p.x=FW-R;p.vx=0}
   if(p.y<R){p.y=R;p.vy=0}if(p.y>FH-R){p.y=FH-R;p.vy=0}
@@ -323,13 +347,20 @@ function collidePlayers(){
   if(d>0&&d<R*2){
     const n={x:dx/d,y:dy/d},o=(R*2-d)/2;
     you.x-=n.x*o;you.y-=n.y*o;bot.x+=n.x*o;bot.y+=n.y*o;
-    const hit=(a,b,s)=>{b.stun=0.75;b.vx=s*n.x*620;b.vy=s*n.y*620;b.dashT=0.12;a.dashT=0;a.vx*=0.3;a.vy*=0.3;b.charging=false;b.charge=0;shake=Math.max(shake,6);if(b===you||a===you)buzz(30)};
+    const hit=(a,b,s)=>{if(ball.owner===b){releaseBall(b,0.9);ball.vx=b.vx*0.5+s*n.x*260;ball.vy=b.vy*0.5+s*n.y*260}b.stun=0.75;b.vx=s*n.x*620;b.vy=s*n.y*620;b.dashT=0.12;a.dashT=0;a.vx*=0.3;a.vy*=0.3;b.charging=false;b.charge=0;shake=Math.max(shake,6);if(b===you||a===you)buzz(30)};
     if(you.dashT>0&&bot.dashT<=0&&bot.stun<=0)hit(you,bot,1);
     else if(bot.dashT>0&&you.dashT<=0&&you.stun<=0)hit(bot,you,-1);
   }
 }
 function collideBall(p){
+  if(ball.owner===p)return;
   const dx=ball.x-p.x,dy=ball.y-p.y,d=len(dx,dy);
+  const canGrab=p.stun<=0&&p.grabCd<=0&&isFront(p);
+  if(ball.owner){ // steal: only a front touch on the carried ball
+    if(d<R+BR+3&&canGrab&&ball.lock<=0){releaseBall(ball.owner,0.35);takeBall(p)}
+    return;
+  }
+  if(d<R+BR+2&&canGrab&&len(ball.vx-p.vx,ball.vy-p.vy)<T.catchSpd){takeBall(p);return}
   if(d>0&&d<R+BR){
     const n={x:dx/d,y:dy/d};ball.x=p.x+n.x*(R+BR);ball.y=p.y+n.y*(R+BR);
     const rvx=ball.vx-p.vx,rvy=ball.vy-p.vy,vn=rvx*n.x+rvy*n.y;
@@ -342,6 +373,17 @@ function postBounce(px,py){
     const vn=ball.vx*n.x+ball.vy*n.y;if(vn<0){ball.vx-=(1+T.bounce)*vn*n.x;ball.vy-=(1+T.bounce)*vn*n.y}}
 }
 function stepBall(dt){
+  ball.lock=Math.max(0,ball.lock-dt);
+  if(ball.owner){ // glued to the carrier's face
+    const p=ball.owner;
+    ball.x=p.x+p.fx*(R+BR+1);ball.y=p.y+p.fy*(R+BR+1);ball.vx=p.vx;ball.vy=p.vy;
+    ball.x=clamp(ball.x,BR,FW-BR);
+    const inMouth=ball.x>GX1+BR*0.5&&ball.x<GX2-BR*0.5;
+    if(!inMouth)ball.y=clamp(ball.y,BR,FH-BR);
+    if(inMouth&&ball.y<0){releaseBall(p,0.5);goal('you')}
+    else if(inMouth&&ball.y>FH){releaseBall(p,0.5);goal('bot')}
+    return;
+  }
   const f=Math.exp(-T.friction*dt);ball.vx*=f;ball.vy*=f;
   const sp=len(ball.vx,ball.vy);if(sp>1700){ball.vx*=1700/sp;ball.vy*=1700/sp}
   ball.x+=ball.vx*dt;ball.y+=ball.vy*dt;
@@ -441,6 +483,8 @@ function render(){
   ctx.fillStyle='rgba(0,0,0,.3)';ctx.beginPath();ctx.arc(ball.x+3,ball.y+4,BR,0,Math.PI*2);ctx.fill();
   ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(ball.x,ball.y,BR,0,Math.PI*2);ctx.fill();
   ctx.strokeStyle='#08151a';ctx.lineWidth=2;ctx.stroke();
+  if(ball.owner){ctx.strokeStyle=ball.owner===you?'#ffb21e':'#ff4f72';ctx.lineWidth=3;ctx.globalAlpha=ball.lock>0?0.5:0.9;
+    ctx.beginPath();ctx.arc(ball.x,ball.y,BR+5,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1}
   for(const p of particles){ctx.globalAlpha=Math.min(1,p.life*1.5);ctx.fillStyle=p.col;ctx.fillRect(p.x-3,p.y-3,6,6)}ctx.globalAlpha=1;
   // screen text
   ctx.setTransform(dpr,0,0,dpr,0,0);
