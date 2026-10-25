@@ -49,6 +49,12 @@ body{background:var(--night);color:var(--chalk);font-family:var(--body);touch-ac
   right:calc(max(16px,env(safe-area-inset-right,0px)) + 130px);bottom:calc(env(safe-area-inset-bottom,0px) + 74px);
   background:conic-gradient(rgba(8,21,26,.75) calc(var(--cd,0)*1turn),var(--chalk) 0);box-shadow:0 6px 18px rgba(0,0,0,.4)}
 .act.down{transform:scale(.93)}
+.act::after{content:attr(data-key);position:absolute;bottom:-22px;left:50%;transform:translateX(-50%);white-space:nowrap;
+  font:500 11px var(--body);letter-spacing:.06em;color:var(--muted);display:none}
+@media (hover:hover) and (pointer:fine){.act::after{display:block}}
+body.kbd .act{opacity:.4}
+body.kbd .act::after{display:block}
+body.kbd #stickHint{display:none}
 
 .overlay{position:fixed;inset:0;z-index:10;display:grid;place-items:center;background:rgba(5,14,17,.78);backdrop-filter:blur(4px);
   padding-block:calc(env(safe-area-inset-top,0px) + 16px) calc(env(safe-area-inset-bottom,0px) + 16px);
@@ -94,8 +100,8 @@ body{background:var(--night);color:var(--chalk);font-family:var(--body);touch-ac
 <div class="stick-hint" id="stickHint">Тяни тут<br>чтобы бежать</div>
 <div class="stick-base" id="stickBase" hidden></div>
 <div class="stick-knob" id="stickKnob" hidden></div>
-<div class="act" id="dashBtn" role="button" aria-label="Рывок">РЫВОК</div>
-<div class="act" id="kickBtn" role="button" aria-label="Удар"><span>УДАР</span></div>
+<div class="act" id="dashBtn" role="button" aria-label="Рывок" data-key="K / Shift">РЫВОК</div>
+<div class="act" id="kickBtn" role="button" aria-label="Удар" data-key="J / Пробел"><span>УДАР</span></div>
 
 <div class="overlay" id="menu">
   <div class="card">
@@ -109,7 +115,7 @@ body{background:var(--night);color:var(--chalk);font-family:var(--body);touch-ac
       <button class="chip" data-d="2" id="d2">Сложный</button>
     </div>
     <button class="btn" id="startBtn">Играть</button>
-    <div class="keys"><b>Телефон</b><span>левая половина экрана — стик, справа кнопки</span><b>Клавиатура</b><span>WASD / стрелки, J или пробел — удар, K или Shift — рывок</span></div>
+    <div class="keys"><b>Телефон</b><span>левая половина экрана — стик, справа кнопки</span><b>Клавиатура</b><span>WASD или стрелки — бег, J или пробел — удар (держи для заряда), K или Shift — рывок, Esc или P — пауза, Enter — старт</span></div>
   </div>
 </div>
 
@@ -202,6 +208,7 @@ function screenToWorldVec(x,y){return land?{x:y,y:-x}:{x,y}}
 
 // ---------- input ----------
 const hint=document.getElementById('stickHint');
+try{if(matchMedia('(hover:hover) and (pointer:fine)').matches)hint.innerHTML='WASD или стрелки<br>чтобы бежать'}catch(e){}
 const zone=document.getElementById('stickZone'), base=document.getElementById('stickBase'), knob=document.getElementById('stickKnob');
 let stick={id:null,ox:0,oy:0,x:0,y:0}, keys={}, kickHeld=false, dashPressed=false;
 zone.addEventListener('pointerdown',e=>{if(stick.id!==null)return;stick.id=e.pointerId;stick.ox=e.clientX;stick.oy=e.clientY;stick.x=stick.y=0;
@@ -220,14 +227,34 @@ function bindBtn(el,down,up){
 const kickBtn=document.getElementById('kickBtn'), dashBtn=document.getElementById('dashBtn');
 bindBtn(kickBtn,()=>kickHeld=true,()=>kickHeld=false);
 bindBtn(dashBtn,()=>dashPressed=true);
-addEventListener('keydown',e=>{const k=e.key.toLowerCase();keys[k]=true;
-  if(k===' '||k==='j'){kickHeld=true;e.preventDefault()} if(k==='k'||k==='shift')dashPressed=true;
-  if(k==='escape'&&state==='play')pause();});
-addEventListener('keyup',e=>{const k=e.key.toLowerCase();keys[k]=false;if(k===' '||k==='j')kickHeld=false;});
+// Physical key codes, so WASD works on any keyboard layout (including Russian ЦФЫВ).
+const KICK_KEYS=['Space','KeyJ','Numpad0'], DASH_KEYS=['KeyK','ShiftLeft','ShiftRight','KeyL'];
+const GAME_KEYS=['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',...KICK_KEYS,...DASH_KEYS];
+function setKbdMode(on){document.body.classList.toggle('kbd',on)}
+addEventListener('keydown',e=>{
+  const c=e.code;
+  if(e.target&&e.target.tagName==='INPUT')return;
+  if(state!=='play'){ // menus: Enter / Space start or resume
+    if((c==='Enter'||c==='Space')&&!e.repeat){
+      const btn=state==='menu'?$('startBtn'):state==='end'?$('againBtn'):state==='pause'?$('resumeBtn'):null;
+      if(btn){e.preventDefault();btn.click()}
+    }
+    if(c==='Escape'&&state==='pause')$('resumeBtn').click();
+    return;
+  }
+  if(GAME_KEYS.includes(c)){e.preventDefault();setKbdMode(true)}
+  keys[c]=true;
+  if(KICK_KEYS.includes(c))kickHeld=true;
+  if(DASH_KEYS.includes(c)&&!e.repeat)dashPressed=true;
+  if(c==='Escape'||c==='KeyP')pause();
+});
+addEventListener('keyup',e=>{keys[e.code]=false;if(KICK_KEYS.includes(e.code)&&!KICK_KEYS.some(k=>keys[k]))kickHeld=false;});
+addEventListener('blur',()=>{keys={};kickHeld=false});
+addEventListener('pointerdown',e=>{if(e.pointerType==='touch')setKbdMode(false)},true);
 function readInput(){
   let x=stick.x,y=stick.y;
-  const kx=(keys['d']||keys['arrowright']?1:0)-(keys['a']||keys['arrowleft']?1:0);
-  const ky=(keys['s']||keys['arrowdown']?1:0)-(keys['w']||keys['arrowup']?1:0);
+  const kx=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0);
+  const ky=(keys.KeyS||keys.ArrowDown?1:0)-(keys.KeyW||keys.ArrowUp?1:0);
   if(kx||ky){x=kx;y=ky;}
   const v=screenToWorldVec(x,y);const m=Math.hypot(v.x,v.y);
   if(m>1){v.x/=m;v.y/=m}
